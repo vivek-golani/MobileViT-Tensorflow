@@ -4,78 +4,19 @@ import random
 import numpy as np
 from PIL import Image
 from pathlib import Path
+
 import tensorflow as tf
 from tensorflow import keras
 from keras import layers, backend
-from data.pipeline import apply_transform
-# import tensorflow_models as tfm
+
+from data.pipeline import load, preprocess
+from data.utils import read_config_file, examples_per_class, visualize_dataset
 
 DATASET_CONFIG_PATH = Path(__file__).parent / "config" / "temp.py"
 DATASET_CATS_PATH = Path(__file__).parent / "config" / "temp.yml"
 
-IGNORE_LABEL = 255  # Define the ignore label value
-
-def read_config_file(cfg_file_path):
-    config_data = {}
-    with open(cfg_file_path, "r") as f:
-        exec(f.read(), config_data)
-    return config_data
-
-def load(image_path, seg_map_path):
-    image = tf.io.read_file(image_path)
-    image = tf.image.decode_image(image, channels=3)
-    image.set_shape((600, 960, 3))
-
-    seg_map = tf.io.read_file(seg_map_path)
-    seg_map = tf.image.decode_image(seg_map, channels=1)
-    seg_map.set_shape((600, 960, 1))
-
-    return image, seg_map
-
-def preprocess(image, seg_map, crop_size, split):        
-    # options: 0 - tf.image transforms, 1- tfm.preprocess_ops, 2 - keras sequential model
-    image, seg_map = apply_transform(image, seg_map, crop_size, split, option=0)
-
-    return image, seg_map
-
-def visualize_dataset(dataset, num_samples, crop_size, split):
-    outdir1 = str(Path(__file__).parent.parent / 'visualizations' / split / 'Original')
-    outdir2 = str(Path(__file__).parent.parent / 'visualizations' / split / 'Loaded')
-    for outdir in [outdir1, outdir2]:
-        if not os.path.exists(outdir):
-            os.makedirs(outdir)
-
-    for idx, (image_path, label_path) in enumerate(dataset.take(num_samples)):
-        image, seg_map = load(image_path, label_path)
-        keras.utils.save_img(outdir1 + f'/{idx}_img.jpg', image)
-        keras.utils.save_img(outdir1 + f'/{idx}_label.jpg', seg_map)
-        image, seg_map = preprocess(image, seg_map, crop_size, split)
-        keras.utils.save_img(outdir2 + f'/{idx}_img.jpg', image*255)
-        keras.utils.save_img(outdir2 + f'/{idx}_label.jpg', seg_map)
-
-def examples_per_class(image_paths, label_paths):
-    class2image = {}
-    class2label = {}    
-    count = 0
-
-    for image_path, label_path in zip(image_paths, label_paths):
-        image, label = load(image_path, label_path)
-        unique_labels = np.unique(label)
-        if len(unique_labels) > 2:
-            count += 1
-        
-        label_class = int(unique_labels[1])
-        if label_class not in class2image:
-            class2image[label_class] = []
-        else:
-            class2image[label_class].append(image_path)
-        
-        if label_class not in class2label:
-            class2label[label_class] = []
-        else:
-            class2label[label_class].append(label_path)
-
-    return class2image, class2label, count
+# Define the ignore label value
+IGNORE_LABEL = 255  
 
 def diff_set_train_val(dataset_dir, split):
     image_dir = Path(dataset_dir) / 'image_dir' / split
@@ -93,7 +34,7 @@ def diff_set_train_val(dataset_dir, split):
 
     return image_paths, seg_map_paths
 
-def same_set_train_val(dataset_dir, split):
+def same_set_train_val(dataset_dir, split, train_ratio=0.9,):
     img_paths, seg_paths = diff_set_train_val(dataset_dir=dataset_dir, split='Train')
     
     # Creating dictionary of paths per class from train set itself
@@ -102,11 +43,12 @@ def same_set_train_val(dataset_dir, split):
     image_paths = []
     seg_map_paths = []
 
-    # Keeping train set as 90% of samples and 10% for validation
+    # Keeping train set as train_ratio percentage of samples and rest for validation
     for cls in class2image.keys():
         cls_len = len(class2image[cls])
-        train_len = int(0.9 * cls_len)
+        train_len = int(train_ratio * cls_len)
         val_len = cls_len - train_len
+
         if split == 'Train':
             image_paths.extend(class2image[cls][:train_len])
             seg_map_paths.extend(class2label[cls][:train_len])
@@ -124,9 +66,14 @@ def create_temp_dataset(**kwargs):
     batch_size=kwargs['batch_size']
     use_same_set=kwargs['use_same_set']
 
+    if 'debug' in kwargs.keys():
+        debug = kwargs['debug']
+    else:
+        debug = 0
+
     auto = tf.data.AUTOTUNE
     
-    # target names and colors - read DATASET_CATS_PATH
+    # for target names and colors - read DATASET_CATS_PATH
 
     config = read_config_file(DATASET_CONFIG_PATH)
     dataset_dir = config['data_root']
@@ -146,9 +93,10 @@ def create_temp_dataset(**kwargs):
     if split=='Train':
         dataset = dataset.shuffle(1000)
 
-    visualize_dataset(dataset=dataset, num_samples=5, crop_size=crop_size, split=split)
+    if debug:
+        visualize_dataset(dataset=dataset, num_samples=5, crop_size=crop_size, split=split)
 
-    # Define the function to load and preprocess the image and segmentation map
+    # Loading and Augmenting Data
     def load_and_preprocess_image(image_path, seg_map_path):
         image, seg_map = load(image_path, seg_map_path)
         image, seg_map = preprocess(image, seg_map, crop_size, split)
