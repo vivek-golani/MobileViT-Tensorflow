@@ -1,4 +1,4 @@
-temp_dataset:
+temp:
     epochs: 50
     eval_freq: 5
     batch_size: 2

@@ -49,10 +49,10 @@ def visualize_dataset(dataset, num_samples, crop_size, split):
 
     for idx, (image_path, label_path) in enumerate(dataset.take(num_samples)):
         image, seg_map = load(image_path, label_path)
-        keras.utils.save_img(outdir1 + f'/{idx}_img.jpg', image)
-        keras.utils.save_img(outdir1 + f'/{idx}_label.jpg', seg_map)
+        keras.utils.save_img(outdir1 + f'/{idx}_img.png', image)
+        keras.utils.save_img(outdir1 + f'/{idx}_label.png', seg_map)
 
         image, seg_map = preprocess(image, seg_map, crop_size, split)
-        keras.utils.save_img(outdir2 + f'/{idx}_img.jpg', image*255)
-        keras.utils.save_img(outdir2 + f'/{idx}_label.jpg', seg_map)
+        keras.utils.save_img(outdir2 + f'/{idx}_img.png', image*255)
+        keras.utils.save_img(outdir2 + f'/{idx}_label.png', seg_map)
 

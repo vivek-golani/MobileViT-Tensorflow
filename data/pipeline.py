@@ -1,6 +1,6 @@
 import random
 import tensorflow as tf
-import tensorflow_models as tfm
+# import tensorflow_models as tfm
 from tensorflow import keras
 from keras import layers, backend
 
@@ -25,22 +25,26 @@ def tf_image_transforms(image, label, crop_size, split):
 
         image, label = combined[:,:,:3], combined[:,:,3:]
         
-        image = tf.image.random_brightness(image, 32, seed=seed)
+        image = image / tf.constant(255, tf.float32)
+        image = tf.image.random_brightness(image, 0.1, seed=seed)
+        image = tf.clip_by_value(image, clip_value_min=0.0, clip_value_max=1.0)
         image = tf.image.random_contrast(image, 0.5, 1.5, seed=seed)
+        image = tf.clip_by_value(image, clip_value_min=0.0, clip_value_max=1.0)
         image = tf.image.random_saturation(image, 0.5, 1.5, seed=seed)
+        image = tf.clip_by_value(image, clip_value_min=0.0, clip_value_max=1.0)
         image = tf.image.random_hue(image, 0.1, seed=seed)
+        image = tf.clip_by_value(image, clip_value_min=0.0, clip_value_max=1.0)
     else:
         combined = tf.image.resize_with_crop_or_pad(combined, crop_size, crop_size)
         combined = tf.cast(combined, tf.float32)
 
         image, label = combined[:,:,:3], combined[:,:,3:]
+        image = image / tf.constant(255, tf.float32)
     
-    image = normalize(image)
-
     return image, label
 
 
-# Transform dataset using tensorflow_models.preprocess_ops
+Transform dataset using tensorflow_models.preprocess_ops
 def tfm_transforms(image, label, crop_size, split):
     combined = tf.concat([image, label], axis=-1)
     seed = random.randint(0, 100) 
@@ -112,3 +116,29 @@ def apply_transform(image, label, crop_size, split, option=0):
     image = tf.reverse(image, axis=[-1])
 
     return image, label
+
+def load_image(image_path):
+    image = tf.io.read_file(image_path)
+    image = tf.image.decode_image(image, channels=3)
+    image.set_shape((600, 960, 3))
+
+    return image
+
+def load_label(seg_map_path):
+    seg_map = tf.io.read_file(seg_map_path)
+    seg_map = tf.image.decode_image(seg_map, channels=1)
+    seg_map.set_shape((600, 960, 1))
+
+    return seg_map
+
+def load(image_path, seg_map_path):
+    image = load_image(image_path)
+    seg_map = load_label(seg_map_path)
+
+    return image, seg_map
+
+def preprocess(image, seg_map, crop_size, split):        
+    # options: 0 - tf.image transforms, 1- tfm.preprocess_ops, 2 - keras sequential model
+    image, seg_map = apply_transform(image, seg_map, crop_size, split, option=0)
+
+    return image, seg_map
