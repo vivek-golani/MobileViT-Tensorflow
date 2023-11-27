@@ -8,8 +8,7 @@ import tensorflow as tf
 import torch
 from tensorflow.keras import layers
 
-from model import mobilevit
-from model.mobilevit_pt import get_mobilevit_pt
+from mobilevit.utils.fetch_and_summarize import get_torch_model, get_tf_model
 
 torch.set_grad_enabled(False)
 
@@ -21,72 +20,14 @@ TF_MODEL_ROOT = "saved_models"
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Conversion of the PyTorch pre-trained MobileViT weights to TensorFlow."
+        description="Training TensorFlow model."
     )
-    parser.add_argument(
-        "-d",
-        "--dataset",
-        default="imagenet-1k",
-        type=str,
-        required=False,
-        choices=["imagenet-1k", "imagenet-21k"],
-        help="Name of the dataset.",
-    )
-    parser.add_argument(
-        "-m",
-        "--model-name",
-        default="mobilevit_s",
-        type=str,
-        required=False,
-        choices=[
-            "mobilevit_xxs",
-            "mobilevit_xs",
-            "mobilevit_s",
-        ],
-        help="Types of MobileViT models.",
-    )
-    parser.add_argument(
-        "-r",
-        "--image-resolution",
-        default=256,
-        type=int,
-        required=False,
-        help="Image resolution of the model.",
-    )
-    parser.add_argument(
-        "-c",
-        "--checkpoint-path",
-        default="https://dl.fbaipublicfiles.com/convnext/convnext_tiny_1k_224_ema.pth",
-        type=str,
-        required=False,
-        help="URL of the checkpoint to be loaded.",
-    )
-    parser.add_argument(
-        "-t",
-        "--task",
-        default="segment",
-        type=str,
-        required=False,
-        choices=["classify", "segment"],
-        help="Downstream task.",
-    )
+    parser.add_argument('-d', '--dataset', default="zebra", type=str, required=False, help='Name of the dataset')
+    parser.add_argument('-m', '--model', default="mobilevit_s", type=str, required=False, choices=['mobilevit_xxs', 'mobilevit_xs', 'mobilevit_s'], help='Flavors of MobileViT models')
+    parser.add_argument('-r', '--resolution', default=512, type=int, required=False, help='Image resolution of the model.')
+    parser.add_argument('-t', '--task', default='segment', type=str, required=False, choices=['classify', 'segment'], help='Downstream task')
+    
     return vars(parser.parse_args())
-
-def get_torch_model(model_name, task):
-    torch_model = get_mobilevit_pt(model_name=model_name, task=task)
-    torch_model.eval()  # run all component in inference mode
-
-    return torch_model
-
-def get_tf_model(model_name, resolution, num_classes, task):
-    tf_model = mobilevit.get_mobilevit_model(
-        model_name=model_name,
-        image_shape=(resolution, resolution, 3),
-        num_classes=num_classes,
-        task=task,
-    )
-
-    return tf_model
 
 
 def copy_weights(torch_model, tf_model, task):
@@ -195,7 +136,118 @@ def copy_weights(torch_model, tf_model, task):
                 )
             )
 
-    def copy_mobilevit_block(tf_layer, torch_layer, num_blocks):
+    def copy_transformer_block(tf_layer, torch_layer, num_blocks, hidden_size):
+        def copy_layernorm(tf_ln_layer, before_after):
+            if isinstance(tf_ln_layer, layers.LayerNormalization):
+                print(f'--- {tf_ln_layer.name}')
+                tf_ln_layer.gamma.assign(
+                    tf.Variable(
+                        model_states[
+                            f'{torch_layer}.transformer.layer.{block}.{before_after}.weight'
+                        ].numpy()
+                    )
+                )
+                tf_ln_layer.beta.assign(
+                    tf.Variable(
+                        model_states[
+                            f'{torch_layer}.transformer.layer.{block}.{before_after}.bias'
+                        ].numpy()
+                    )
+                )
+
+        def copy_dense(tf_dense_layer, inter_out):
+            if isinstance(tf_dense_layer, layers.Dense):
+                print(f'--- {tf_dense_layer.name}')
+                temp = tf.Variable(
+                    model_states[
+                        f'{torch_layer}.transformer.layer.{block}.{inter_out}.dense.weight'
+                    ].numpy()
+                )
+                print(f" SHAPE: {temp.shape}")
+                
+                tf_dense_layer.kernel.assign(
+                    tf.Variable(
+                        model_states[
+                            f'{torch_layer}.transformer.layer.{block}.{inter_out}.dense.weight'
+                        ].numpy().transpose(1, 0)
+                    )
+                )
+                tf_dense_layer.bias.assign(
+                    tf.Variable(
+                        model_states[
+                            f'{torch_layer}.transformer.layer.{block}.{inter_out}.dense.bias'
+                        ].numpy()
+                    )
+                )
+        
+        def copy_mha(tf_mha_layer):
+            def copy_qkv(tf_qkv_layer, qkv_layer):
+                if isinstance(tf_qkv_layer, layers.Dense):
+                    print(f'--- {tf_mha_layer.name}.{qkv_layer}')
+                    tf_qkv_layer.kernel.assign(
+                        tf.Variable(
+                            model_states[
+                                f'{torch_layer}.transformer.layer.{block}.attention.attention.{qkv_layer}.weight'
+                            ].numpy()   
+                        )
+                    )
+                    tf_qkv_layer.bias.assign(
+                        tf.Variable(
+                            model_states[
+                                f'{torch_layer}.transformer.layer.{block}.attention.attention.{qkv_layer}.bias'
+                            ].numpy()
+                        )
+                    )
+            
+            def copy_out(tf_attn_out_layer):
+                if isinstance(tf_attn_out_layer, layers.Dense):
+                    print(f'--- {tf_attn_out_layer.name}')
+                    tf_attn_out_layer.kernel.assign(
+                        tf.Variable(
+                            model_states[
+                                f'{torch_layer}.transformer.layer.{block}.attention.output.dense.weight'
+                            ].numpy()   
+                        )
+                    )
+                    tf_attn_out_layer.bias.assign(
+                        tf.Variable(
+                            model_states[
+                                f'{torch_layer}.transformer.layer.{block}.attention.output.dense.bias'
+                            ].numpy()
+                        )
+                    )
+
+            tf_query_layer = tf_mha_layer.attention.query
+            copy_qkv(tf_query_layer, 'query')
+
+            tf_key_layer = tf_mha_layer.attention.key
+            copy_qkv(tf_key_layer, 'key')
+
+            tf_value_layer = tf_mha_layer.attention.value
+            copy_qkv(tf_value_layer, 'value')
+
+            tf_attn_out_layer = tf_mha_layer.dense_output.dense
+            copy_out(tf_attn_out_layer)
+
+
+        for block in range(num_blocks):
+            attn_ln_tf = tf_model.get_layer(f'{tf_layer}{2+block}_attn_ln')
+            copy_layernorm(attn_ln_tf, 'layernorm_before')
+            
+            mha_tf = tf_model.get_layer(f'{tf_layer}{2+block}_mha')
+            copy_mha(mha_tf)
+
+            mlp_ln_tf = tf_model.get_layer(f'{tf_layer}{2+block}_mlp_ln')
+            copy_layernorm(mlp_ln_tf, 'layernorm_after')
+
+            intermediate_tf = tf_model.get_layer(f'{tf_layer}{2+block}_mlp_Dense_{2*hidden_size}')
+            copy_dense(intermediate_tf, 'intermediate')
+
+            output_tf = tf_model.get_layer(f'{tf_layer}{2+block}_mlp_Dense_{hidden_size}')
+            copy_dense(output_tf, 'output')
+
+
+    def copy_mobilevit_block(tf_layer, torch_layer, num_blocks, hidden_size):
         # conv 3*3 
         mobilevit_1_conv_1_tf = tf_model.get_layer(
             f'{tf_layer}2_pre_1_conv'
@@ -243,8 +295,9 @@ def copy_weights(torch_model, tf_model, task):
             )
 
 
-        # # transformer block
-        # copy_transformer_block('', '', num_blocks)
+        # transformer block
+        copy_transformer_block(tf_layer, torch_layer, num_blocks, hidden_size)
+
 
         # conv 1*1
         mobilevit_1_conv_3_tf = tf_model.get_layer(
@@ -474,19 +527,19 @@ def copy_weights(torch_model, tf_model, task):
     copy_inverted_residual('stack3_block1_deep', 'mobilevit.encoder.layer.2.downsampling_layer')
 
     print(f'Stack3 - Block2, 3')
-    copy_mobilevit_block('stack3_block', 'mobilevit.encoder.layer.2', 2)
+    copy_mobilevit_block('stack3_block', 'mobilevit.encoder.layer.2', 2, 144)
 
     print(f'Stack4 - Block1')
     copy_inverted_residual('stack4_block1_deep', 'mobilevit.encoder.layer.3.downsampling_layer')
 
     print(f'Stack4 - Block2, 3, 4, 5')
-    copy_mobilevit_block('stack4_block', 'mobilevit.encoder.layer.3', 4)
+    copy_mobilevit_block('stack4_block', 'mobilevit.encoder.layer.3', 4, 192)
 
     print(f'Stack5 - Block1')
     copy_inverted_residual('stack5_block1_deep', 'mobilevit.encoder.layer.4.downsampling_layer')
 
     print(f'Stack5 - Block2, 3, 4')
-    copy_mobilevit_block('stack5_block', 'mobilevit.encoder.layer.4', 3)
+    copy_mobilevit_block('stack5_block', 'mobilevit.encoder.layer.4', 3, 240)
 
     if task == 'classify':
         pass
@@ -497,41 +550,22 @@ def copy_weights(torch_model, tf_model, task):
     return tf_model
 
 def main(args):
-    print(f'Model: {args["model_name"]}')
-    print(f'Image resolution: {args["image_resolution"]}')
+    print(f'Model: {args["model"]}')
+    print(f'Image resolution: {args["resolution"]}')
     print(f'Dataset: {args["dataset"]}')
-    print(f'Checkpoint URL: {args["checkpoint_path"]}')
     print(f'Downstream Task: {args["task"]}')
     
     print("Instantiating PyTorch model and populating weights...")
-    torch_model = get_torch_model(args["model_name"], args["task"])
+    torch_model = get_torch_model(args["model"], args["task"])
     
     print("Instantiating TensorFlow model...")
-    tf_model = get_tf_model(args["model_name"], args["image_resolution"], 64, args["task"])
+    tf_model = get_tf_model(args["model"], args["resolution"], 64, args["task"])
 
     print("TensorFlow model instantiated, populating pretrained weights...")
     tf_model = copy_weights(torch_model, tf_model)
 
-    # if args["task"] == 'classify':
-    #     pass
-    #     Classifier Head
-    #     tf_model.layers[-1].kernel.assign(
-    #         tf.Variable(model_states[state_list[-2]].numpy().transpose())
-    #     )
-    #     tf_model.layers[-1].bias.assign(
-    #         tf.Variable(model_states[state_list[-1]].numpy())
-    #     )
-    # else:
-    #     pass
-    #     convert_segmentation_block(
-    #         tf_model,
-    #         param_list,
-    #         model_states,
-    #         state_list,
-    #     )
-
     print("Weight population successful, serializing TensorFlow model...")
-    model_name = f'{args["model_name"]}_{args["image_resolution"]}'
+    model_name = f'{args["model"]}_{args["resolution"]}'
     save_path = os.path.join(TF_MODEL_ROOT, f'{model_name}_')
     tf_model.save(save_path)
     print(f"TensorFlow model serialized to: {save_path}...")
